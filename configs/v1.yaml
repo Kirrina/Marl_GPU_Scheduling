@@ -1,0 +1,47 @@
+# Mirrors contracts/shared.py default configuration (C0). No automatic file parsing yet.
+# TOML/Python dataclass is source of truth; owners must sign fields at IC0.
+contract_version: 0.1.0-draft
+environment:
+  num_clusters: 3
+  nodes_per_cluster: 4
+  gpu_per_node: 4
+  cpu_per_node: 16
+  ram_gib_per_node: 64
+  max_defer: 5
+  episode_jobs_N: 500
+fragmentation:
+  alpha_ema: 0.05
+  lambda_queue: 1.0
+  weight_imbalance: 0.2          # TUNE
+  l_scale: 1.0                   # TEST PLACEHOLDER ONLY
+  l_scale_origin: placeholder    # CHANGE TO calibrated_random_valid BEFORE TRAINING
+workload:
+  source: synthetic
+  synthetic_duration_seconds: 3.0
+  philly_use_trace_duration: true
+  gpu_demands: [1, 2, 4]
+  cpu_choices: [1, 2, 4, 8]
+  ram_gib_choices: [4, 8, 16, 32]
+  trace_time_scale: 1.0
+reward:
+  lambda_management: null       # TUNE before training
+  beta: null                    # TUNE before training
+  forward_base_b: null          # TUNE, >1
+training:
+  rollout_macro_steps: 128      # initial proposal, not locked
+  n_step_macro_steps: 16        # initial proposal, not locked
+  gamma_global: null           # TUNE before training
+  gamma_within_job: 1.0
+  actor_lr: null
+  critic_lr: null
+  entropy_coef: null
+  value_coef: null
+  grad_clip_norm: null
+evaluation:
+  offered_load_targets: [0.40, 0.65, 0.85]
+  baseline_names: [random_valid, first_fit, best_fit, rr_cluster_best_fit]
+seeds:
+  workload_seed: 2026
+  network_seed: 2027
+  policy_seed: 2028
+  baseline_seed: 2029

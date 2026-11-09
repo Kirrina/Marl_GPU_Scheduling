@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "marl-gpu-scheduling-v1"
+version = "0.1.0"
+description = "WP0 contract-first skeleton for two-stream MARL GPU scheduling V1"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6", "pyyaml>=6"]
+learning = ["torch>=2.2"]
+
+[project.scripts]
+gpusched = "gpusched.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = ["pending: implementation intentionally not started; TODO acceptance tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

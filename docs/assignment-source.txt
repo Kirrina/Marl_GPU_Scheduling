@@ -1,0 +1,387 @@
+MARL GPU Scheduling V1 — Phân công hai luồng, kiến trúc và hợp đồng API
+Phiên bản 1.0 · 09/11/2026 · Người A: Environment & Control · Người B: Learning, Workload & Evaluation
+1. Tóm tắt
+Tài liệu này làm ba việc: vẽ lại kiến trúc sau khi chốt WP0 và D1–D6, chia việc thành hai luồng chạy độc lập chỉ biết nhau qua API, và đặt quy tắc để merge code. Tài liệu không chứa code triển khai; các chữ ký giao diện chỉ mô tả hợp đồng.
+Ba ý chính:
+• Đường cắt là DecisionPoint. Simulator là phía "thụ động" (chỉ chạy khi được hỏi), phía Learning là phía "chủ động" (vòng lặp gọi run_until_next_decision rồi apply_action). Nhờ vậy Người A không cần PyTorch, Người B không cần biết logic queue hay Gate.
+• Ba hợp đồng dữ liệu phải đóng băng ở WP0: C1 Workload File, C2 Decision API, C3 Event Log.
+• Mỗi người tự viết mock của phía bên kia, và cả hai cùng chạy một bộ contract test và golden fixtures. Merge chỉ là thay mock bằng bản thật.
+2. Kiến trúc hệ thống
+2.1 Sơ đồ tầng
+ LUỒNG B — LEARNING, WORKLOAD, EVALUATION (không biết queue/Gate)
+ +--------------------------------------------------------------+
+ | Workload: synthetic / Philly  --> Workload File (C1) ------+ |
+ | Trainer: A2C, n-step, ManagementRollout, ClusterRollout    | |
+ | Networks: E_M^A  E_M^V  E_C^A  E_C^V                       | |
+ |           Management Actor/Critic, Shared Cluster Actor/Critic |
+ | Evaluator: p_eval, F_eval, B4, metrics   <-- Event Log (C3) | |
+ +-----------------^--------------------------+-----------------+
+                   | DecisionPoint            | SchedulingAction
+                   | (C2)                     | (C2)
+                   |            PlacementResult (facts) (C2)
+ +-----------------+--------------------------v-----------------+
+ | LUỒNG A — ENVIRONMENT & CONTROL (không biết PyTorch)         |
+ | EventSimulator -- ExecutionManager (release = t_alloc + T_J) |
+ | QueueController -- ManagementGate -- PRIORITY_LOCK           |
+ | Attempt state machine: Management -> Cluster* -> Allocate    |
+ | CostFeatureCalculator: EMA, F, dF, L, dL, C, C*, masks       |
+ | Baselines (4) cùng interface Scheduler · Calibration L_scale |
+ +--------------------------------------------------------------+
+2.2 Luồng một scheduling attempt
+1. Simulator xử lý theo thứ tự: completion, arrival, rồi một queue sweep (D08, D09).
+2. Gate kiểm tra job có placement hợp lệ ở đâu đó trong hệ thống không. Nếu không, job bị defer hoặc chờ release và không sinh DecisionPoint, không sinh transition.
+3. Nếu có, Simulator trả DecisionPoint(MANAGEMENT) với mask cả K cluster đều khả dụng (MASK01).
+4. Scheduler (MARL hoặc baseline) trả SELECT_CLUSTER. Simulator ghi initial_cluster, đặt forward_count = 0, visited = {initial}, rồi trả DecisionPoint(CLUSTER).
+5. Scheduler trả ALLOCATE(node) hoặc FORWARD(cluster). Với Forward, Simulator cập nhật visited, forward_count và trả DecisionPoint(CLUSTER) mới cho cluster đích. Bước này lặp tối đa K−1 lần.
+6. Khi ALLOCATE, Simulator trừ tài nguyên, ExecutionManager tạo completion event, và trả PlacementResult chứa các sự kiện (facts) của attempt.
+7. Phía Learning tính reward từ facts và RewardConfig, rồi ghi Transition vào buffer của Management và Cluster.
+2.3 Nguyên tắc kiến trúc đã chốt
+• Simulator là nguồn duy nhất được thay đổi trạng thái tài nguyên (I3).
+• duration chỉ nằm trong Simulator, không xuất hiện trong DecisionPoint (D07).
+• MARL và 4 baseline dùng cùng interface select_action(decision) và cùng controller; mỗi scheduler chạy trên simulator instance độc lập với cùng workload (I2, I4).
+• Gate-only event, defer và chờ release không sinh RL transition (Q10).
+• Rollout on-policy, không replay; SchedulingHistory chỉ để log (TR03).
+3. Ranh giới giữa hai luồng
+Hợp đồng
+Chiều
+Nội dung
+Người viết
+Người đọc
+C0 Config
+Dùng chung
+EnvironmentConfig, FragmentationConfig, WorkloadConfig, RewardConfig, TrainingConfig, EvaluationConfig, SeedConfig
+Cả hai (đóng băng ở WP0)
+Cả hai
+C1 Workload File
+B sang A
+Danh sách job đã sinh, kèm metadata và hash
+B
+A (và các baseline)
+C2 Decision API
+Hai chiều
+DecisionPoint, SchedulingAction, PlacementResult
+A sinh DecisionPoint và PlacementResult
+B tiêu thụ; B sinh SchedulingAction
+C3 Event Log
+A sang B
+Nhật ký sự kiện theo thời gian để tính metric
+A
+B (Evaluator)
+Ngoài bốn hợp đồng này, hai bên không import code của nhau.
+4. Phân công
+4.1 Luồng A — Environment & Control
+Mã
+Module
+Phạm vi
+Test
+Ngày công (ước lượng)
+A1
+Data core
+Job, Node, Cluster, eligibility, validator bảo toàn tài nguyên
+TST01, TST02
+3
+A2
+EventSimulator + ExecutionManager
+Event queue, thứ tự cùng timestamp, release đúng hạn, ghi Event Log (C3)
+TST12
+6
+A3
+QueueController + ManagementGate + state machine attempt
+Sweep theo snapshot, defer, PRIORITY_LOCK, UNSCHEDULABLE, visited/forward limit, mask Allocate/Forward
+TST03, TST05, TST06, TST09, TST10, TST11, TST19
+6
+A4
+CostFeatureCalculator + observation builder
+EMA, queue profile, F, ΔF, L, ΔL, C, C*, histogram, sentinel, dựng DecisionPoint
+TST04, TST07, TST08
+5
+A5
+Bốn baseline
+Random Valid, First Fit, Best Fit, RR + Best Fit theo D2; adapter hai bước SELECT_CLUSTER, ALLOCATE
+TST16 (phần simulator)
+3
+A6
+Calibration L_scale
+Random Valid trên training workload, p95 của |ΔL|, lưu vào config (D1)
+Kiểm tra tỷ lệ clip
+1
+
+Tổng
+
+
+24
+Không thuộc A: mọi thứ liên quan PyTorch, reward, buffer, sinh workload, tính metric đánh giá.
+4.2 Luồng B — Learning, Workload, Evaluation
+Mã
+Module
+Phạm vi
+Test
+Ngày công (ước lượng)
+B1
+Workload
+Sinh synthetic (Poisson, offered load), bộ sinh CPU/RAM (D3), tiền xử lý Philly (D4), ghi Workload File kèm hash
+TST18
+7
+B2
+Networks
+4 encoder độc lập, Management Actor/Critic, Shared Cluster Actor/Critic, candidate scoring, masked categorical
+TST15
+6
+B3
+Training engine
+Tính reward từ facts, JobTrajectory, hai rollout buffer, n-step discount hỗn hợp, bootstrap lookahead, A2C update, checkpoint
+TST13, TST14, TST20
+9
+B4
+Evaluation
+Đọc Event Log, p_eval, F_eval, B₄, các metric EV01–EV10, logger chẩn đoán
+TST17
+5
+
+Tổng
+
+
+27
+Không thuộc B: queue, Gate, Execution Manager, cost calculator, baseline.
+4.3 Cân bằng tải
+B nặng hơn A khoảng 3 ngày công. Bù lại bằng cách: A chạy toàn bộ thí nghiệm baseline và hỗ trợ gỡ lỗi simulator ở giai đoạn tích hợp; B chạy thí nghiệm MARL và vẽ biểu đồ. Nếu Philly (D4) phát sinh nhiều việc, A nhận thêm nhánh "xác minh schema Philly" vì nó chỉ cần đọc file.
+5. Hợp đồng API chi tiết
+Các kích thước dưới đây là đề xuất để ký ở WP0. Ví dụ K = 3, M = 4. Tensor sắp xếp theo cluster_id, node_id tăng dần; vector phân bố theo thứ tự GPU demand (1, 2, 4).
+5.1 C2 — DecisionPoint
+Trường chung (Management và Cluster):
+Trường
+Kích thước
+Mô tả
+decision_type
+enum
+MANAGEMENT hoặc CLUSTER
+episode_id, attempt_id, job_id, sim_time
+scalar
+Định danh và thời gian mô phỏng
+job_features (p_J)
+3
+gpu_req/4, cpu_req/16, ram_req/64
+node_features
+[K][M][4]
+gpu_free/4, cpu_free/16, ram_free/64, running_jobs/4
+cluster_stats
+[K][10]
+h₀..h₄ (đếm node/M), u_i, F_i (chuẩn hóa theo M·F_max), n_eligible/M, C̄*_i, v_eligible
+p_tilde
+3
+Phân bố p̃ theo (1, 2, 4), cùng snapshot trước và sau attempt
+action_mask
+Management: [K]
+Tất cả true khi Gate cho qua (MASK01)
+Trường bổ sung riêng cho CLUSTER:
+Trường
+Kích thước
+Mô tả
+current_cluster
+scalar
+Cluster đang quyết định
+q_J
+scalar
+forward_count/(K−1)
+visited_flags
+[K]
+1 nếu đã thăm (gồm cả cluster hiện tại); tách biệt với v_eligible (NN09)
+alloc_mask
+[M]
+Node đủ GPU, CPU, RAM (MASK02)
+alloc_delta_f
+[M]
+ΔF̂ của từng node; node không hợp lệ đặt 0 và bị mask
+forward_mask
+[K]
+Khác hiện tại, chưa thăm, có node hợp lệ (MASK03, MASK04)
+Nguyên tắc: A cấp thừa, B tự chọn dùng gì. Actor chỉ dùng phần S4 cho phép; Critic dùng toàn bộ node_features và cluster_stats. Nhờ vậy đổi cách dùng ở phía B không cần đổi hợp đồng.
+5.2 C2 — SchedulingAction
+Loại
+Tham số
+Hợp lệ khi
+SELECT_CLUSTER
+cluster
+Ở DecisionPoint MANAGEMENT; mọi cluster đều được chọn
+FORWARD
+cluster (đích)
+Ở DecisionPoint CLUSTER; forward_mask[cluster] = 1
+ALLOCATE
+node_index trong cluster hiện tại
+Ở DecisionPoint CLUSTER; alloc_mask[node] = 1
+Action sai mask làm Simulator trả lỗi và không đổi trạng thái. Trong chạy thật điều này không được xảy ra; test dùng để bắt lỗi mask.
+5.3 C2 — PlacementResult (đề xuất bổ sung cho I3)
+Simulator trả sự kiện, không trả reward. Phía B tính reward từ RewardConfig (λ_M, β, b), nên tinh chỉnh reward không đòi hỏi sửa simulator.
+Trường
+Khi nào có
+Ý nghĩa
+status
+Luôn
+OK hoặc INVALID
+kind
+Luôn
+SELECT_CLUSTER, FORWARD, hoặc ALLOCATE
+initial_cluster
+Sau SELECT_CLUSTER
+Cluster Management chọn
+forward_index (m)
+FORWARD
+Thứ tự lần Forward, bắt đầu từ 1
+is_forced
+FORWARD
+True nếu cluster hiện tại không có node hợp lệ (RWD03) hay false (RWD04)
+placement_cost C_{i,n}
+ALLOCATE
+Dùng cho RWD01 và RWD02
+final_cluster, final_node
+ALLOCATE
+Dùng cho P_initial
+delta_f_hat, delta_l_hat
+ALLOCATE
+Chỉ để chẩn đoán
+attempt_closed
+Luôn
+True khi ALLOCATE (hoặc requeue an toàn)
+5.4 C1 — Workload File
+• Header: workload_id, hash nội dung, nguồn (synthetic, philly, synthetic_fill), seed, tham số sinh, trace_time_scale, thống kê phân bố (số job lọc, tỷ lệ lọc).
+• Mỗi job (sắp theo arrival): job_id, arrival_time, gpu_req, cpu_req, ram_req, duration, source_label.
+• Quy ước đơn vị: GPU nguyên chiếc, CPU cores, RAM GiB, thời gian giây. gpu_req thuộc {1, 2, 4}; duration > 0.
+5.5 C3 — Event Log
+Mỗi bản ghi có time, event_type, job_id và các trường theo loại. Các loại: ARRIVAL, DEFER, PRIORITY_LOCK_ON/OFF, UNSCHEDULABLE, SELECT_CLUSTER, FORWARD, ALLOCATE, COMPLETE.
+• ALLOCATE và COMPLETE ghi cluster, node và gpu_free_after của node đó. Evaluator dựng lại trạng thái theo thời gian từ các bản ghi này và tính tích phân theo thời gian (F̄_eval, B₄, utilization, L).
+• Mọi bản ghi làm đổi queue ghi thêm queue_len và queue_len_by_gpu (3 số), để tính số job 4 GPU đang chờ (EV06).
+• DEFER ghi defer_count.
+• p_eval (EV03) tính từ chuỗi arrival trong Workload File, không từ log, nên không phụ thuộc scheduler.
+5.6 Quy tắc chung của hợp đồng
+1. Mọi số đều hữu hạn, không NaN hay inf (F13).
+2. Không có duration hay remaining time trong DecisionPoint.
+3. Chiều và thứ tự cố định theo EnvironmentConfig.
+4. Hợp đồng có contract_version. Đổi trường hay ý nghĩa thì tăng version và cần cả hai người đồng ý.
+5. Seed: workload, network, policy và baseline tách riêng (I4). Bộ sinh CPU/RAM và phần synthetic_fill dùng sub-stream cố định suy ra từ workload_seed (xem mục 9).
+6. Cách làm độc lập
+Mock mỗi bên tự viết:
+• A viết ScriptedScheduler (thực chất là First Fit đóng gói theo interface Scheduler) để lái simulator mà không cần model.
+• B viết FakeEnvironment sinh DecisionPoint hợp lệ theo đúng state machine (Management, rồi Cluster 1 đến K, rồi Allocate) cùng PlacementResult nhất quán, và FakeEventLog để thử Evaluator.
+Golden fixtures nằm trong contracts/: khoảng 6 kịch bản "trạng thái → DecisionPoint kỳ vọng", tính tay từ công thức đặc tả:
+1. Cluster trống hoàn toàn.
+2. Cluster với GPU trống theo node [4, 2, 2, 0] (kiểm MEAN, MAX, histogram).
+3. Cluster không có node hợp lệ (kiểm sentinel C̄* = 0 và v_eligible = 0).
+4. Forward lần thứ hai với visited đã có (kiểm q_J và forward_mask).
+5. Queue rỗng (p̃ = p).
+6. Job 4 GPU khi p̃ lệch (kiểm dấu của ΔF).
+A viết fixture, B tính lại bằng tay. Đây là cross-review có chủ đích: nếu hai người hiểu công thức khác nhau thì lộ ra ngay ở tuần 0, không phải sau khi merge.
+Contract test suite (schema validator + golden) chạy trong CI của cả hai luồng. Mọi thứ chạm contracts/ phải xanh trước khi merge.
+7. Cấu trúc repo và quy tắc merge
+Thư mục
+Chủ sở hữu
+Quy tắc
+contracts/
+Cả hai
+Schema, validator, golden fixtures. Thay đổi cần cả hai duyệt
+sim/, baselines/
+A
+Không import learning/
+learning/, workload/, eval/
+B
+Không import sim/
+configs/
+Cả hai
+Config snapshot theo experiment
+experiments/
+Chung
+Chỉ tạo sau mốc IC2
+• Hai thư mục của mỗi bên chỉ được import contracts/. Có thể kiểm bằng quy tắc lint về import để không ai vô tình phụ thuộc vào nội bộ của bên kia.
+• Mỗi PR chỉ cần người kia review phần chạm contracts/, không cần đọc nội bộ.
+• Mỗi tuần có một buổi "contract sync" ngắn để xử lý các đề nghị đổi hợp đồng (ghi thành CHANGE-xxx).
+• Mỗi experiment lưu config snapshot, seed, workload ID và hash, checkpoint ID, phiên bản phần mềm (I4).
+8. Lộ trình và mốc tích hợp
+Ước lượng thô cho hai người làm toàn thời gian, khoảng 6 tuần.
+Tuần
+Người A
+Người B
+Mốc
+0 (2–3 ngày)
+Ký hợp đồng (mục 10), dựng repo, viết golden fixtures
+Review fixtures, dựng skeleton, viết FakeEnvironment
+IC0: contract test xanh trên hai mock
+1
+A1, bắt đầu A2
+B2 (networks) trên fake env; B1 synthetic
+
+2
+Xong A2; A3
+Xong B2; B3 (buffers, n-step, reward) trên fake env
+
+3
+Xong A3; A4; A5
+Xong B3 (vòng A2C trên fake env); B1 Philly
+IC1: simulator thật + baseline ghi được Event Log; DecisionPoint thật qua validator; networks của B chạy forward pass trên DecisionPoint thật
+4
+A6 calibration; chạy baseline
+B4 evaluation trên log thật; ghép trainer với simulator thật
+IC2: một episode end-to-end; TST13, TST14, TST16 xanh trên env thật
+5
+Hỗ trợ gỡ lỗi, chạy baseline ở 3 mức tải
+Train MARL, kiểm tra sanity
+IC3: MARL vượt Random Valid ở workload đơn giản trước khi tune bất cứ gì
+6
+Chạy baseline đủ seed
+Chạy MARL đủ seed, biểu đồ, báo cáo
+Báo cáo (P7)
+Bước kiểm tra sanity ở IC3 rất quan trọng: nếu MARL không thắng được Random Valid ở workload dễ, lỗi nằm ở pipeline, không phải ở hyperparameter.
+9. Rủi ro và điểm cần lưu ý (rút ra từ D1–D6 và WP0)
+1. Transition "cũ" sinh ra khi lookahead bootstrap. I1 nói quyết định của policy khác xuất hiện khi tìm observation kế tiếp vẫn do policy đóng băng xử lý và được tính cho rollout sau. Nhưng quyết định đầu tiên của rollout kế tiếp đã được lấy mẫu bằng policy trước update. Hai lựa chọn: (a) đánh dấu stale và loại khỏi batch kế; (b) chấp nhận lệch vài transition. Đề xuất (a). Quyết định này thuộc B và không ảnh hưởng A.
+2. CPU/RAM sẽ thường xuyên là ràng buộc binding. Theo D3, CPU trung bình 3,75 cores và RAM trung bình 15 GiB mỗi job, độc lập với số GPU. Một node 16 cores / 64 GiB chạy 4 job trung bình đã dùng khoảng 94% CPU. Vì vậy sẽ có GPU còn trống nhưng không dùng được (stranded GPU), mà F chỉ-GPU không nhìn thấy. Đây là hệ quả của D3, đã được đặc tả cho phép. Đề xuất A ghi thêm một metric chẩn đoán "GPU trống nhưng không có job nào trong queue vừa CPU/RAM", không đưa vào reward, chi phí thấp.
+3. Episode ngắn. Với duration cố định 3 giây, phân bố demand đều (E[G] = 7/3) thì E[G·T] = 7 GPU·giây. Offered load 40%, 65%, 85% tương ứng λ_a ≈ 2,74; 4,46; 5,83 job/giây, nên 500 job chỉ kéo dài khoảng 182, 112, 86 giây mô phỏng. Hợp lý cho V1 nhưng cần biết khi đọc learning curve.
+4. UNSCHEDULABLE không bao giờ xảy ra với cấu hình D3. Mọi job (GPU ≤ 4, CPU ≤ 8, RAM ≤ 32) đều vừa một node trống. Vì vậy TST11 cần job tiêm thủ công, không thể chờ nó tự xuất hiện.
+5. Baseline gồm hai lời gọi cho một job (SELECT_CLUSTER rồi ALLOCATE). Baseline có trạng thái, đặc biệt RR + Best Fit, chỉ được cập nhật con trỏ ở lần SELECT_CLUSTER, không cập nhật lần nữa ở ALLOCATE. Nếu không, thứ tự luân phiên sẽ lệch. Metric "initial = final cluster" của baseline luôn là 100%, báo N/A.
+6. SeedConfig thiếu seed riêng cho bộ sinh CPU/RAM và synthetic_fill. Đề xuất suy ra sub-stream cố định từ workload_seed (ví dụ gắn nhãn "cpu", "ram", "fill"), để vẫn đúng I4 mà không thêm trường.
+7. D4 (Philly) chưa xác minh. Nếu sau lọc còn ít job và phải bổ sung synthetic, mọi job phải mang source_label và báo cáo phải nói rõ tỷ lệ pha trộn, nếu không kết quả trên "Philly" sẽ gây hiểu nhầm.
+8. Reward do ai tính. Mục 5.3 đề xuất Simulator trả facts và B tính reward. Cần chốt trong WP0 vì nó quyết định PlacementResult.
+10. Danh sách cần ký ở WP0 trước khi tách ra làm
+[ ] Danh sách và chuẩn hóa chính xác node_features (4 chiều) và cluster_stats (10 chiều).
+[ ] PlacementResult dạng facts (mục 5.3) và việc B tính reward.
+[ ] Thứ tự tensor, thứ tự p̃ (1, 2, 4), kích thước K và M từ config.
+[ ] Schema C1 (Workload File) và C3 (Event Log): tên trường, kiểu, đơn vị.
+[ ] Cách suy sub-seed từ workload_seed.
+[ ] Tín hiệu Terminal và quy ước episode_id, drain đến khi hết job.
+[ ] Quy tắc xử lý transition stale (mục 9, điểm 1) và vai trò của lookahead.
+[ ] Quy tắc adapter hai bước của baseline (mục 9, điểm 5).
+[ ] Phiên bản Python, PyTorch, công cụ format, CI, và quy tắc lint import.
+Phụ lục — Ma trận test và người chịu trách nhiệm
+Test
+Chủ
+Ghi chú
+TST01, TST02
+A
+Bảo toàn tài nguyên, một job một node
+TST03, TST09, TST10, TST11
+A
+Gate, sweep, PRIORITY_LOCK, UNSCHEDULABLE (job tiêm thủ công)
+TST04, TST05, TST06
+A
+Mask Management, mask Cluster, giới hạn Forward
+TST07, TST08
+A
+Cost, sentinel; dùng golden fixtures
+TST12
+A
+Release đúng t_alloc + T_J
+TST19
+A
+Đường requeue phải ở trạng thái dormant
+TST13, TST14
+B
+Rollout isolation, bootstrap; chạy trên fake env rồi lặp lại trên env thật ở IC2
+TST15
+B
+Shared Cluster weights, 4 encoder độc lập
+TST17, TST18
+B
+Metrics isolation, preprocessing trace
+TST20
+B
+Checkpoint, eval tất định
+TST16
+Chung
+A đảm bảo cùng queue và controller; B đảm bảo cùng workload và metric

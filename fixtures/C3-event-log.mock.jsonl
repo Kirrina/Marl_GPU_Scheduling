@@ -1,0 +1,4 @@
+{"time":0.0,"event_type":"ARRIVAL","job_id":"s0","queue_len":1,"queue_len_by_gpu":[1,0,0],"contract_version":"0.1.0-draft"}
+{"time":0.0,"event_type":"SELECT_CLUSTER","job_id":"s0","attempt_id":0,"cluster_id":0,"initial_cluster":0,"gpu_eligible_node_count":12,"cpu_ram_blocked_node_count":0,"cpu_ram_blocked_ratio":0.0,"contract_version":"0.1.0-draft"}
+{"time":0.0,"event_type":"ALLOCATE","job_id":"s0","attempt_id":0,"cluster_id":0,"node_id":0,"gpu_free_after":3,"queue_len":0,"queue_len_by_gpu":[0,0,0],"contract_version":"0.1.0-draft"}
+{"time":3.0,"event_type":"COMPLETE","job_id":"s0","attempt_id":0,"cluster_id":0,"node_id":0,"gpu_free_after":4,"contract_version":"0.1.0-draft"}

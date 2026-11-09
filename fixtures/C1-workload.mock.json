@@ -1,0 +1,41 @@
+{
+  "header": {
+    "workload_id": "mock-synthetic-v1",
+    "source": "synthetic",
+    "seed": 2026,
+    "content_hash": "e8d60f1f0f9a21484725e79bb615ab4ea3fb9dd6b221570fb8281e936853b65f",
+    "trace_time_scale": 1.0,
+    "generator_parameters": {},
+    "filter_stats": {},
+    "contract_version": "0.1.0-draft"
+  },
+  "jobs": [
+    {
+      "job_id": "s0",
+      "arrival_time": 0.0,
+      "gpu_req": 1,
+      "cpu_req": 1,
+      "ram_req": 4,
+      "duration": 3.0,
+      "source_label": "synthetic"
+    },
+    {
+      "job_id": "s1",
+      "arrival_time": 0.4,
+      "gpu_req": 2,
+      "cpu_req": 2,
+      "ram_req": 8,
+      "duration": 3.0,
+      "source_label": "synthetic"
+    },
+    {
+      "job_id": "s2",
+      "arrival_time": 1.0,
+      "gpu_req": 4,
+      "cpu_req": 8,
+      "ram_req": 32,
+      "duration": 3.0,
+      "source_label": "synthetic"
+    }
+  ]
+}

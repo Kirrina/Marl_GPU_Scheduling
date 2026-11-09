@@ -1,0 +1,10 @@
+# Rename to CODEOWNERS after actual GitHub handles are known.
+# Replace @A and @B with GitHub usernames; both should review contracts.
+/contracts/ @A @B
+/src/gpusched/contracts/ @A @B
+/src/gpusched/sim/ @A
+/src/gpusched/baselines/ @A
+/src/gpusched/calibration/ @A
+/src/gpusched/workload/ @B
+/src/gpusched/learning/ @B
+/src/gpusched/eval/ @B

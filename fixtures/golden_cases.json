@@ -1,0 +1,134 @@
+{
+  "contract_version": "0.1.0-draft",
+  "cases": [
+    {
+      "id": "G01",
+      "name": "Empty cluster fully free",
+      "input": {
+        "gpu_free": [
+          4,
+          4,
+          4,
+          4
+        ],
+        "gpu_req": 1
+      },
+      "expected": {
+        "normalized_histogram": [
+          0,
+          0,
+          0,
+          0,
+          1
+        ],
+        "eligible_gpu_nodes": 4,
+        "cluster_gpu_utilization": 0.0
+      }
+    },
+    {
+      "id": "G02",
+      "name": "Fragmented free GPU [4,2,2,0]",
+      "input": {
+        "gpu_free": [
+          4,
+          2,
+          2,
+          0
+        ]
+      },
+      "expected": {
+        "normalized_histogram": [
+          0.25,
+          0,
+          0.5,
+          0,
+          0.25
+        ],
+        "cluster_gpu_utilization": 0.5,
+        "mean_free": 2,
+        "max_free": 4
+      }
+    },
+    {
+      "id": "G03",
+      "name": "No eligible node sentinel",
+      "input": {
+        "gpu_free": [
+          3,
+          3,
+          3,
+          3
+        ],
+        "gpu_req": 4
+      },
+      "expected": {
+        "eligible_nodes": 0,
+        "best_cost_or_zero": 0.0,
+        "v_eligible": 0.0
+      }
+    },
+    {
+      "id": "G04",
+      "name": "Second forward step visited flag",
+      "input": {
+        "K": 3,
+        "current_cluster": 1,
+        "visited": [
+          0,
+          1
+        ],
+        "forward_count": 1,
+        "destination_eligible": [
+          true,
+          true,
+          true
+        ]
+      },
+      "expected": {
+        "forward_mask": [
+          false,
+          false,
+          true
+        ],
+        "q_j": 0.5
+      }
+    },
+    {
+      "id": "G05",
+      "name": "Empty queue fallback to EMA",
+      "input": {
+        "arrival_profile": [
+          0.2,
+          0.3,
+          0.5
+        ],
+        "queue_jobs": [],
+        "lambda_queue": 1.0
+      },
+      "expected": {
+        "p_tilde": [
+          0.2,
+          0.3,
+          0.5
+        ]
+      }
+    },
+    {
+      "id": "G06",
+      "name": "GPU demand 4 has deltaF zero; other demands test signs",
+      "input": {
+        "p_tilde": [
+          0.1,
+          0.1,
+          0.8
+        ]
+      },
+      "expected": {
+        "delta_f_hat_job4_from4": 0.0,
+        "delta_f_hat_job2_from4": 0.6666666666666666,
+        "delta_f_hat_job1_from3": -0.3333333333333333,
+        "f_max": 2.4
+      }
+    }
+  ]
+}
